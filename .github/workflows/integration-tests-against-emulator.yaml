@@ -92,6 +92,12 @@ jobs:
       - run: gcloud config set api_endpoint_overrides/spanner http://localhost:9020/
       - run: gcloud spanner instances create test-instance --config=emulator-config --description="Test Instance" --nodes=1
 
+
+      # create a GCS instance
+      - run: gcloud config set api_endpoint_overrides/storage http://localhost:4443/storage/v1/
+      - run: docker run -d --name fake-gcs-server -p 4443:4443 -v ${PWD}/test_data:/data fsouza/fake-gcs-server -scheme http
+      - run: curl http://0.0.0.0:4443/storage/v1/b
+
       # run tests
       - uses: actions/setup-go@v2
         with:
@@ -100,5 +106,6 @@ jobs:
       - run: go test -v ./...
         env:
           SPANNER_EMULATOR_HOST: localhost:9010
+          STORAGE_EMULATOR_HOST: localhost:4443
           HARBOURBRIDGE_TESTS_GCLOUD_PROJECT_ID: emulator-test-project
           HARBOURBRIDGE_TESTS_GCLOUD_INSTANCE_ID: test-instance

@@ -33,6 +33,8 @@ import (
 	database "cloud.google.com/go/spanner/admin/database/apiv1"
 	"github.com/cloudspannerecosystem/harbourbridge/cmd"
 	"github.com/cloudspannerecosystem/harbourbridge/conversion"
+
+	//fakestorage "github.com/fsouza/fake-gcs-server/fakestorage"
 	"google.golang.org/api/iterator"
 	databasepb "google.golang.org/genproto/googleapis/spanner/admin/database/v1"
 )
@@ -148,7 +150,7 @@ func TestIntegration_PGDUMP_Command(t *testing.T) {
 	// is because file prefixes use `now` from here (the test function) and
 	// the generated time in the files uses a `now` inside the command, which
 	// can be different.
-	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge -instance %s -dbname %s -prefix %s < %s", instanceID, dbName, filePrefix, dataFilepath))
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge -instance %s -dbname %s -prefix %s -dump-file %s", instanceID, dbName, filePrefix, dataFilepath))
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -178,7 +180,7 @@ func TestIntegration_PGDUMP_SchemaCommand(t *testing.T) {
 	// is because file prefixes use `now` from here (the test function) and
 	// the generated time in the files uses a `now` inside the command, which
 	// can be different.
-	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge schema < %s", dataFilepath))
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge schema -dump-file %s", dataFilepath))
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -258,6 +260,99 @@ func TestIntegration_POSTGRES_SchemaCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestIntegration_PGDUMP_Command_GCS(t *testing.T) {
+	onlyRunForEmulatorTest(t)
+	//createGCSBucketWithDumpfile()
+	t.Parallel()
+
+	tmpdir := prepareIntegrationTest(t)
+	defer os.RemoveAll(tmpdir)
+
+	now := time.Now()
+	dbName, _ := conversion.GetDatabaseName(conversion.PGDUMP, now)
+	dbURI := fmt.Sprintf("projects/%s/instances/%s/databases/%s", projectID, instanceID, dbName)
+
+	dataFilepath := "gs://test-bucket/pg_dump.test.out"
+	filePrefix := filepath.Join(tmpdir, dbName+".")
+	// Be aware that when testing with the command, the time `now` might be
+	// different between file prefixes and the contents in the files. This
+	// is because file prefixes use `now` from here (the test function) and
+	// the generated time in the files uses a `now` inside the command, which
+	// can be different.
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge -instance %s -dbname %s -prefix %s -dump-file %s", instanceID, dbName, filePrefix, dataFilepath))
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("GCLOUD_PROJECT=%s", projectID),
+	)
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("stdout: %q\n", out.String())
+		fmt.Printf("stderr: %q\n", stderr.String())
+		t.Fatal(err)
+	}
+	// Drop the database later.
+	defer dropDatabase(t, dbURI)
+
+	checkResults(t, dbURI)
+}
+
+func TestIntegration_PGDUMP_SchemaCommand_GCS(t *testing.T) {
+	onlyRunForEmulatorTest(t)
+	//createGCSBucketWithDumpfile()
+	t.Parallel()
+
+	tmpdir := prepareIntegrationTest(t)
+	defer os.RemoveAll(tmpdir)
+
+	dataFilepath := "gs://test-bucket/pg_dump.test.out"
+	// Be aware that when testing with the command, the time `now` might be
+	// different between file prefixes and the contents in the files. This
+	// is because file prefixes use `now` from here (the test function) and
+	// the generated time in the files uses a `now` inside the command, which
+	// can be different.
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge schema -dump-file %s", dataFilepath))
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("stdout: %q\n", out.String())
+		fmt.Printf("stderr: %q\n", stderr.String())
+		t.Fatal(err)
+	}
+}
+
+/*func createGCSBucketWithDumpfile() {
+	localDumpFilePath := "../../test_data/pg_dump.test.out"
+	localDumpFile, err := os.Open(localDumpFilePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dumpFile, err := ioutil.ReadAll(localDumpFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	server, err := fakestorage.NewServerWithOptions(fakestorage.Options{
+		InitialObjects: []fakestorage.Object{
+			{
+				ObjectAttrs: fakestorage.ObjectAttrs{
+					BucketName: "test-bucket",
+					Name:       "pg_dump.test.out",
+				},
+				Content: dumpFile,
+			},
+		},
+		Scheme:     "http",
+		Host:       "localhost",
+		Port:       uint16(9000),
+		PublicHost: "localhost:9000",
+	})
+	if err != nil {
+		log.Fatalf("cannot create fake gcs server: %v", err)
+	}
+	defer server.Stop()
+}*/
 
 func checkResults(t *testing.T, dbURI string) {
 	// Make a query to check results.
@@ -390,6 +485,9 @@ func checkArrays(ctx context.Context, t *testing.T, client *spanner.Client) {
 
 func onlyRunForEmulatorTest(t *testing.T) {
 	if os.Getenv("SPANNER_EMULATOR_HOST") == "" {
+		t.Skip("Skipping tests only running against the emulator.")
+	}
+	if os.Getenv("STORAGE_EMULATOR_HOST") == "" {
 		t.Skip("Skipping tests only running against the emulator.")
 	}
 }

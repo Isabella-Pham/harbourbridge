@@ -5,6 +5,7 @@ go 1.13
 require (
 	cloud.google.com/go v0.93.3
 	cloud.google.com/go/spanner v1.10.0
+	cloud.google.com/go/storage v1.10.0
 	github.com/DATA-DOG/go-sqlmock v1.4.1
 	github.com/aws/aws-sdk-go v1.34.5
 	github.com/go-sql-driver/mysql v1.5.0

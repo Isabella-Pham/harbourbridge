@@ -32,7 +32,10 @@ import (
 
 	"cloud.google.com/go/spanner"
 	database "cloud.google.com/go/spanner/admin/database/apiv1"
+
+	storage "cloud.google.com/go/storage"
 	"google.golang.org/api/iterator"
+	option "google.golang.org/api/option"
 
 	databasepb "google.golang.org/genproto/googleapis/spanner/admin/database/v1"
 )
@@ -84,6 +87,7 @@ func initIntegrationTests() (cleanup func()) {
 	return func() {
 		databaseAdmin.Close()
 	}
+
 }
 
 func dropDatabase(t *testing.T, dbURI string) {
@@ -152,7 +156,7 @@ func TestIntegration_MYSQL_SimpleUse(t *testing.T) {
 }
 
 func runSchemaOnly(t *testing.T, dbName, filePrefix, sessionFile, dumpFilePath string) {
-	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge -driver mysqldump -schema-only -dbname %s -prefix %s < %s", dbName, filePrefix, dumpFilePath))
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge -driver mysqldump -schema-only -dbname %s -prefix %s -dump-file %s", dbName, filePrefix, dumpFilePath))
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -164,7 +168,7 @@ func runSchemaOnly(t *testing.T, dbName, filePrefix, sessionFile, dumpFilePath s
 }
 
 func runDataOnly(t *testing.T, dbName, dbURI, filePrefix, sessionFile, dumpFilePath string) {
-	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge -driver mysqldump -data-only -instance %s -dbname %s -prefix %s -session %s < %s", instanceID, dbName, filePrefix, sessionFile, dumpFilePath))
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("go run github.com/cloudspannerecosystem/harbourbridge -driver=mysqldump -data-only -instance %s -dbname %s -prefix %s -session %s -dump-file %s", instanceID, dbName, filePrefix, sessionFile, dumpFilePath))
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -187,18 +191,21 @@ func TestIntegration_MySQLDUMP_SchemaOnly(t *testing.T) {
 	filePrefix := filepath.Join(tmpdir, dbName+".")
 	sessionFile := fmt.Sprintf("%ssession.json", filePrefix)
 	runSchemaOnly(t, dbName, filePrefix, sessionFile, dumpFilePath)
-	if _, err := os.Stat(fmt.Sprintf("%sreport.txt", filePrefix)); os.IsNotExist(err) {
-		t.Fatalf("report file not generated during schema-only test")
-	}
-	if _, err := os.Stat(fmt.Sprintf("%sschema.ddl.txt", filePrefix)); os.IsNotExist(err) {
-		t.Fatalf("legal ddl file not generated during schema-only test")
-	}
-	if _, err := os.Stat(fmt.Sprintf("%sschema.txt", filePrefix)); os.IsNotExist(err) {
-		t.Fatalf("readable schema file not generated during schema-only test")
-	}
-	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
-		t.Fatalf("session file not generated during schema-only test")
-	}
+	checkOutputFiles(t, filePrefix, sessionFile)
+}
+
+func TestIntegration_MySQLDUMP_SchemaOnly_GCS(t *testing.T) {
+	onlyRunForEmulatorTest(t)
+	//uploadDumpfileToGCS()
+	tmpdir := prepareIntegrationTest(t)
+	defer os.RemoveAll(tmpdir)
+
+	dbName := "test-data-only-mode"
+	dumpFilePath := "gs://test-bucket/mysqldump.test.out"
+	filePrefix := filepath.Join(tmpdir, dbName+".")
+	sessionFile := fmt.Sprintf("%ssession.json", filePrefix)
+	runSchemaOnly(t, dbName, filePrefix, sessionFile, dumpFilePath)
+	checkOutputFiles(t, filePrefix, sessionFile)
 }
 
 func TestIntegration_MySQLDUMP_DataOnly(t *testing.T) {
@@ -214,8 +221,70 @@ func TestIntegration_MySQLDUMP_DataOnly(t *testing.T) {
 
 	dbURI := fmt.Sprintf("projects/%s/instances/%s/databases/%s", projectID, instanceID, dbName)
 	runDataOnly(t, dbName, dbURI, filePrefix, sessionFile, dumpFilePath)
+
+	// Drop the database later.
 	defer dropDatabase(t, dbURI)
+
 	checkResults(t, dbURI)
+}
+
+func TestIntegration_MySQLDUMP_DataOnly_GCS(t *testing.T) {
+	onlyRunForEmulatorTest(t)
+	//uploadDumpfileToGCS()
+
+	tmpdir := prepareIntegrationTest(t)
+	defer os.RemoveAll(tmpdir)
+
+	dbName := "test-data-only-mode"
+	dumpFilePath := "gs://test-bucket/mysqldump.test.out"
+	filePrefix := filepath.Join(tmpdir, dbName+".")
+	sessionFile := fmt.Sprintf("%ssession.json", filePrefix)
+	runSchemaOnly(t, dbName, filePrefix, sessionFile, dumpFilePath)
+
+	dbURI := fmt.Sprintf("projects/%s/instances/%s/databases/%s", projectID, instanceID, dbName)
+	runDataOnly(t, dbName, dbURI, filePrefix, sessionFile, dumpFilePath)
+
+	// Drop the database later.
+	defer dropDatabase(t, dbURI)
+
+	checkResults(t, dbURI)
+}
+
+func uploadDumpfileToGCS() {
+	localDumpFilePath := "../../test_data/mysqldump.test.out"
+	localDumpFile, err := os.Open(localDumpFilePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dumpFile, err := ioutil.ReadAll(localDumpFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	localDumpFile.Close()
+
+	bucketName := "test-bucket"
+	fileName := "mysqldump.test.out"
+
+	client, err := storage.NewClient(ctx, option.WithoutAuthentication())
+
+	bucket := client.Bucket(bucketName)
+	if err := bucket.Create(ctx, projectID, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	if err != nil {
+		log.Fatal(err)
+	}
+	wc := bucket.Object(fileName).NewWriter(ctx)
+	if _, err := wc.Write(dumpFile); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := wc.Close(); err != nil {
+		log.Fatal(err)
+	}
+	client.Close()
 }
 
 func checkResults(t *testing.T, dbURI string) {
@@ -227,6 +296,21 @@ func checkResults(t *testing.T, dbURI string) {
 	defer client.Close()
 
 	checkBigInt(ctx, t, client)
+}
+
+func checkOutputFiles(t *testing.T, filePrefix string, sessionFile string) {
+	if _, err := os.Stat(fmt.Sprintf("%sreport.txt", filePrefix)); os.IsNotExist(err) {
+		t.Fatalf("report file not generated during schema-only test")
+	}
+	if _, err := os.Stat(fmt.Sprintf("%sschema.ddl.txt", filePrefix)); os.IsNotExist(err) {
+		t.Fatalf("legal ddl file not generated during schema-only test")
+	}
+	if _, err := os.Stat(fmt.Sprintf("%sschema.txt", filePrefix)); os.IsNotExist(err) {
+		t.Fatalf("readable schema file not generated during schema-only test")
+	}
+	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
+		t.Fatalf("session file not generated during schema-only test")
+	}
 }
 
 func checkBigInt(ctx context.Context, t *testing.T, client *spanner.Client) {
@@ -252,6 +336,9 @@ func checkBigInt(ctx context.Context, t *testing.T, client *spanner.Client) {
 
 func onlyRunForEmulatorTest(t *testing.T) {
 	if os.Getenv("SPANNER_EMULATOR_HOST") == "" {
-		t.Skip("Skipping tests only running against the emulator.")
+		t.Skip("Skipping tests only running against the spanner emulator.")
+	}
+	if os.Getenv("STORAGE_EMULATOR_HOST") == "" {
+		t.Skip("Skipping tests only running against the storage emulator.")
 	}
 }
